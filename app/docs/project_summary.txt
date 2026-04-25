@@ -1,0 +1,6 @@
+Project: AssistNote
+Type: Object detection for Australian banknotes
+Goal: Build a mobile-style assistive GUI for testing a YOLO model that detects 5AUD, 10AUD, 20AUD, 50AUD, and 100AUD notes.
+Preferred output: Mobile-first polished GUI with image upload first, and structure ready for live camera later.
+Need audio feedback for visually impaired users.
+Best current model: YOLOv8n based custom trained best.pt

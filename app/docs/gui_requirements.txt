@@ -1,0 +1,20 @@
+Build a polished mobile-first GUI for AssistNote.
+
+Requirements:
+- large buttons
+- accessible layout
+- clean modern design
+- image upload
+- easy live camera extension
+- display original image
+- display predicted image with boxes
+- show denominations and confidence
+- show note count
+- audio feedback using text-to-speech
+- low-confidence retry message
+- confidence threshold setting
+- voice on/off setting
+- simple navigation suitable for demo
+
+Preferred stack:
+- Streamlit first
