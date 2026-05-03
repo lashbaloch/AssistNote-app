@@ -93,3 +93,28 @@ http://localhost:8501
 - The app currently prioritises camera capture for a phone-browser demo.
 - Uploaded images are still supported as a backup path.
 - If no detection passes the selected threshold, the app shows and speaks a retry message.
+
+## Updated model note
+
+This package has been updated with the new trained YOLO `app/models/best.pt` model.
+The app uses the corrected class mapping:
+
+```text
+0 = 5_dollar
+1 = 10_dollar
+2 = 50_dollar
+3 = 20_dollar
+4 = 100_dollar
+```
+
+To test the model before launching the Streamlit app:
+
+```bash
+python test_model.py
+```
+
+To run the app:
+
+```bash
+streamlit run streamlit_app.py
+```
