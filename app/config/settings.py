@@ -8,7 +8,7 @@ MODEL_PATH = APP_ROOT / "models" / "best.pt"
 CLASSES_PATH = APP_ROOT / "config" / "classes.json"
 SAMPLE_IMAGES_DIR = APP_ROOT / "sample_images"
 
-DEFAULT_CONFIDENCE = 0.35
+DEFAULT_CONFIDENCE = 0.50
 LOW_CONFIDENCE_FLOOR = 0.05
 IMAGE_SIZE = 640
 
