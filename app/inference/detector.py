@@ -1,160 +1,228 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-import os
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-
-os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
-
 from ultralytics import YOLO
 
-from app.config.settings import IMAGE_SIZE, LOW_CONFIDENCE_FLOOR
 
-
-@dataclass(frozen=True)
+@dataclass
 class Detection:
     label: str
     confidence: float
-    box: tuple[float, float, float, float]
+    box: tuple[int, int, int, int]
 
 
-@dataclass(frozen=True)
+@dataclass
 class DetectionResult:
-    original_image: Image.Image
-    annotated_image: Image.Image
     detections: list[Detection]
-    low_confidence_detections: list[Detection]
-
-    @property
-    def note_count(self) -> int:
-        return len(self.detections)
-
-    @property
-    def best_confidence(self) -> float:
-        all_detections = self.detections or self.low_confidence_detections
-        if not all_detections:
-            return 0.0
-        return max(detection.confidence for detection in all_detections)
+    annotated_image: Image.Image
+    best_label: str | None
+    best_confidence: float
+    note_count: int
 
 
 class BanknoteDetector:
-    """Small wrapper around the trained YOLO model."""
+    def __init__(self, model_path: str | Path, class_names: dict[int, str] | None = None) -> None:
+        self.model_path = Path(model_path)
 
-    def __init__(self, model_path: Path, class_labels: dict[int, str]) -> None:
-        self.model_path = model_path
-        self.class_labels = class_labels
-        self.model = YOLO(str(model_path))
+        if not self.model_path.exists():
+            raise FileNotFoundError(f"Model file not found: {self.model_path}")
 
-    def predict_image(self, image: Image.Image, confidence_threshold: float) -> DetectionResult:
-        """Run inference on a PIL image and return display-ready results."""
-        original = image.convert("RGB")
-        source = np.asarray(original)
+        self.model = YOLO(str(self.model_path))
+
+        # Correct AssistNote class mapping from original obj.names:
+        # 0 = 5AUD, 1 = 10AUD, 2 = 50AUD, 3 = 20AUD, 4 = 100AUD
+        self.class_names = class_names or {
+            0: "5_dollar",
+            1: "10_dollar",
+            2: "50_dollar",
+            3: "20_dollar",
+            4: "100_dollar",
+        }
+
+        # Force display names to match correct dataset order.
+        self.model.names = self.class_names
+
+    def predict(
+        self,
+        image: Image.Image,
+        confidence_threshold: float = 0.50,
+        iou_threshold: float = 0.45,
+    ) -> DetectionResult:
+        image = image.convert("RGB")
 
         results = self.model.predict(
-            source=source,
-            conf=LOW_CONFIDENCE_FLOOR,
-            imgsz=IMAGE_SIZE,
-            save=False,
+            source=np.array(image),
+            conf=confidence_threshold,
+            iou=iou_threshold,
+            imgsz=640,
             verbose=False,
         )
-        result = results[0]
 
-        detections: list[Detection] = []
-        low_confidence: list[Detection] = []
+        raw_detections: list[Detection] = []
 
-        for box in result.boxes:
-            class_id = int(box.cls.item())
-            confidence = float(box.conf.item())
-            xyxy = tuple(float(value) for value in box.xyxy[0].tolist())
+        if results and len(results) > 0:
+            result = results[0]
 
-            detection = Detection(
-                label=self.class_labels.get(class_id, f"Class {class_id}"),
-                confidence=confidence,
-                box=xyxy,
-            )
+            if result.boxes is not None:
+                for box in result.boxes:
+                    cls_id = int(box.cls.item())
+                    confidence = float(box.conf.item())
 
-            if confidence >= confidence_threshold:
-                detections.append(detection)
-            else:
-                low_confidence.append(detection)
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
+                    detection = Detection(
+                        label=self.class_names.get(cls_id, f"class_{cls_id}"),
+                        confidence=confidence,
+                        box=(int(x1), int(y1), int(x2), int(y2)),
+                    )
+                    raw_detections.append(detection)
 
-        annotated = self._draw_annotations(original, detections)
-
-        return DetectionResult(
-            original_image=original,
-            annotated_image=annotated,
-            detections=detections,
-            low_confidence_detections=low_confidence,
+        # Extra safety filter:
+        # If two detections overlap strongly, keep only the highest-confidence one.
+        filtered_detections = self.remove_duplicate_boxes(
+            raw_detections,
+            overlap_threshold=0.35,
         )
 
-    def _draw_annotations(self, image: Image.Image, detections: list[Detection]) -> Image.Image:
-        canvas = image.copy()
-        draw = ImageDraw.Draw(canvas)
+        annotated_image = self.draw_detections(image, filtered_detections)
+
+        if filtered_detections:
+            best = max(filtered_detections, key=lambda d: d.confidence)
+            best_label = best.label
+            best_confidence = best.confidence
+        else:
+            best_label = None
+            best_confidence = 0.0
+
+        return DetectionResult(
+            detections=filtered_detections,
+            annotated_image=annotated_image,
+            best_label=best_label,
+            best_confidence=best_confidence,
+            note_count=len(filtered_detections),
+        )
+
+    @staticmethod
+    def box_area(box: tuple[int, int, int, int]) -> int:
+        x1, y1, x2, y2 = box
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+    @classmethod
+    def box_iou(cls, box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+
+        inter_area = cls.box_area((inter_x1, inter_y1, inter_x2, inter_y2))
+        area_a = cls.box_area(box_a)
+        area_b = cls.box_area(box_b)
+
+        union = area_a + area_b - inter_area
+
+        if union <= 0:
+            return 0.0
+
+        return inter_area / union
+
+    @classmethod
+    def overlap_ratio_smaller_box(
+        cls,
+        box_a: tuple[int, int, int, int],
+        box_b: tuple[int, int, int, int],
+    ) -> float:
+        """
+        This is stronger than normal IoU for duplicate detections.
+        If one box is inside another box, normal IoU can be small,
+        but this ratio will still catch it as duplicate.
+        """
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+
+        inter_area = cls.box_area((inter_x1, inter_y1, inter_x2, inter_y2))
+        smaller_area = min(cls.box_area(box_a), cls.box_area(box_b))
+
+        if smaller_area <= 0:
+            return 0.0
+
+        return inter_area / smaller_area
+
+    @classmethod
+    def remove_duplicate_boxes(
+        cls,
+        detections: list[Detection],
+        overlap_threshold: float = 0.35,
+    ) -> list[Detection]:
+        """
+        Sort by confidence and remove lower-confidence detections that overlap
+        with an already accepted detection.
+
+        This fixes the issue where one physical note is detected twice,
+        for example as both 5_dollar and 10_dollar.
+        """
+        if not detections:
+            return []
+
+        detections = sorted(detections, key=lambda d: d.confidence, reverse=True)
+        kept: list[Detection] = []
+
+        for detection in detections:
+            duplicate = False
+
+            for existing in kept:
+                iou = cls.box_iou(detection.box, existing.box)
+                smaller_overlap = cls.overlap_ratio_smaller_box(detection.box, existing.box)
+
+                if iou >= overlap_threshold or smaller_overlap >= 0.55:
+                    duplicate = True
+                    break
+
+            if not duplicate:
+                kept.append(detection)
+
+        return kept
+
+    def draw_detections(self, image: Image.Image, detections: list[Detection]) -> Image.Image:
+        annotated = image.copy()
+        draw = ImageDraw.Draw(annotated)
+
+        try:
+            font = ImageFont.truetype("Arial.ttf", 18)
+        except Exception:
+            font = ImageFont.load_default()
 
         for detection in detections:
             x1, y1, x2, y2 = detection.box
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+            label_text = f"{detection.label} {detection.confidence:.0%}"
 
-            label = f"{detection.label} {detection.confidence:.0%}"
-            color = (31, 226, 144)
+            draw.rectangle((x1, y1, x2, y2), outline=(0, 255, 120), width=4)
 
-            # Draw bounding box
-            draw.rectangle([x1, y1, x2, y2], outline=color, width=4)
+            text_bbox = draw.textbbox((x1, y1), label_text, font=font)
+            text_w = text_bbox[2] - text_bbox[0]
+            text_h = text_bbox[3] - text_bbox[1]
 
-            # Draw label background + text
-            self._draw_label(draw, label, x1, y1, color)
+            label_y = max(0, y1 - text_h - 8)
+            draw.rectangle(
+                (x1, label_y, x1 + text_w + 8, label_y + text_h + 6),
+                fill=(0, 255, 120),
+            )
+            draw.text(
+                (x1 + 4, label_y + 3),
+                label_text,
+                fill=(0, 0, 0),
+                font=font,
+            )
 
-        return canvas
-
-    @staticmethod
-    def _get_font(size: int = 20):
-        """Try to load a nicer font, otherwise fall back safely."""
-        try:
-            return ImageFont.truetype("arial.ttf", size)
-        except Exception:
-            try:
-                return ImageFont.truetype("DejaVuSans.ttf", size)
-            except Exception:
-                return ImageFont.load_default()
-
-    def _draw_label(
-        self,
-        draw: ImageDraw.ImageDraw,
-        label: str,
-        x: int,
-        y: int,
-        color: tuple[int, int, int],
-    ) -> None:
-        font = self._get_font(20)
-
-        bbox = draw.textbbox((x, y), label, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-
-        padding_x = 10
-        padding_y = 6
-        top = max(y - text_height - padding_y * 2 - 4, 0)
-
-        # Background rectangle
-        draw.rectangle(
-            [
-                x,
-                top,
-                x + text_width + padding_x * 2,
-                top + text_height + padding_y * 2,
-            ],
-            fill=color,
-        )
-
-        # Text
-        draw.text(
-            (x + padding_x, top + padding_y - 1),
-            label,
-            fill=(9, 15, 28),
-            font=font,
-        )
-
-    def predict_frame(self, frame: np.ndarray, confidence_threshold: float) -> DetectionResult:
-        """Future camera path: accept an RGB frame and reuse the same inference flow."""
-        return self.predict_image(Image.fromarray(frame), confidence_threshold)
+        return annotated
