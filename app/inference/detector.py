@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -26,7 +25,7 @@ class DetectionResult:
 
 
 class BanknoteDetector:
-    def __init__(self, model_path: str | Path, class_names: dict[int, str] | None = None) -> None:
+    def __init__(self, model_path: str | Path, class_names: dict[int, str] | dict[str, str] | None = None) -> None:
         self.model_path = Path(model_path)
 
         if not self.model_path.exists():
@@ -34,9 +33,13 @@ class BanknoteDetector:
 
         self.model = YOLO(str(self.model_path))
 
-        # Correct AssistNote class mapping from original obj.names:
-        # 0 = 5AUD, 1 = 10AUD, 2 = 50AUD, 3 = 20AUD, 4 = 100AUD
-        self.class_names = class_names or {
+        # Correct AssistNote class order from original obj.names:
+        # 0 = 5AUD
+        # 1 = 10AUD
+        # 2 = 50AUD
+        # 3 = 20AUD
+        # 4 = 100AUD
+        default_class_names = {
             0: "5_dollar",
             1: "10_dollar",
             2: "50_dollar",
@@ -44,8 +47,20 @@ class BanknoteDetector:
             4: "100_dollar",
         }
 
-        # Force display names to match correct dataset order.
-        self.model.names = self.class_names
+        if class_names:
+            self.class_names = {int(k): v for k, v in class_names.items()}
+        else:
+            self.class_names = default_class_names
+
+        # Do NOT use: self.model.names = self.class_names
+        # Some Ultralytics/Torch versions do not allow assigning model.names directly.
+
+    def predict_image(self, image: Image.Image, confidence_threshold: float = 0.50) -> DetectionResult:
+        return self.predict(
+            image=image,
+            confidence_threshold=confidence_threshold,
+            iou_threshold=0.45,
+        )
 
     def predict(
         self,
@@ -70,19 +85,21 @@ class BanknoteDetector:
 
             if result.boxes is not None:
                 for box in result.boxes:
-                    cls_id = int(box.cls.item())
+                    class_id = int(box.cls.item())
                     confidence = float(box.conf.item())
 
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    detection = Detection(
-                        label=self.class_names.get(cls_id, f"class_{cls_id}"),
-                        confidence=confidence,
-                        box=(int(x1), int(y1), int(x2), int(y2)),
-                    )
-                    raw_detections.append(detection)
 
-        # Extra safety filter:
-        # If two detections overlap strongly, keep only the highest-confidence one.
+                    label = self.class_names.get(class_id, f"class_{class_id}")
+
+                    raw_detections.append(
+                        Detection(
+                            label=label,
+                            confidence=confidence,
+                            box=(int(x1), int(y1), int(x2), int(y2)),
+                        )
+                    )
+
         filtered_detections = self.remove_duplicate_boxes(
             raw_detections,
             overlap_threshold=0.35,
@@ -91,9 +108,9 @@ class BanknoteDetector:
         annotated_image = self.draw_detections(image, filtered_detections)
 
         if filtered_detections:
-            best = max(filtered_detections, key=lambda d: d.confidence)
-            best_label = best.label
-            best_confidence = best.confidence
+            best_detection = max(filtered_detections, key=lambda d: d.confidence)
+            best_label = best_detection.label
+            best_confidence = best_detection.confidence
         else:
             best_label = None
             best_confidence = 0.0
@@ -138,11 +155,6 @@ class BanknoteDetector:
         box_a: tuple[int, int, int, int],
         box_b: tuple[int, int, int, int],
     ) -> float:
-        """
-        This is stronger than normal IoU for duplicate detections.
-        If one box is inside another box, normal IoU can be small,
-        but this ratio will still catch it as duplicate.
-        """
         ax1, ay1, ax2, ay2 = box_a
         bx1, by1, bx2, by2 = box_b
 
@@ -165,13 +177,6 @@ class BanknoteDetector:
         detections: list[Detection],
         overlap_threshold: float = 0.35,
     ) -> list[Detection]:
-        """
-        Sort by confidence and remove lower-confidence detections that overlap
-        with an already accepted detection.
-
-        This fixes the issue where one physical note is detected twice,
-        for example as both 5_dollar and 10_dollar.
-        """
         if not detections:
             return []
 
@@ -179,17 +184,17 @@ class BanknoteDetector:
         kept: list[Detection] = []
 
         for detection in detections:
-            duplicate = False
+            is_duplicate = False
 
             for existing in kept:
                 iou = cls.box_iou(detection.box, existing.box)
                 smaller_overlap = cls.overlap_ratio_smaller_box(detection.box, existing.box)
 
                 if iou >= overlap_threshold or smaller_overlap >= 0.55:
-                    duplicate = True
+                    is_duplicate = True
                     break
 
-            if not duplicate:
+            if not is_duplicate:
                 kept.append(detection)
 
         return kept
@@ -214,6 +219,7 @@ class BanknoteDetector:
             text_h = text_bbox[3] - text_bbox[1]
 
             label_y = max(0, y1 - text_h - 8)
+
             draw.rectangle(
                 (x1, label_y, x1 + text_w + 8, label_y + text_h + 6),
                 fill=(0, 255, 120),
